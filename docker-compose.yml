@@ -1,0 +1,159 @@
+x-security: &security
+  security_opt:
+    - no-new-privileges:true
+
+x-authentik: &authentik
+  <<: *security
+  image: ghcr.io/goauthentik/server:${AUTHENTIK_TAG:-2026.8.5}
+  restart: unless-stopped
+  depends_on:
+    authentik-db:
+      condition: service_healthy
+  environment: &authentik-env
+    AUTHENTIK_POSTGRESQL__HOST: authentik-db
+    AUTHENTIK_POSTGRESQL__NAME: authentik
+    AUTHENTIK_POSTGRESQL__USER: authentik
+    AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:?PG_PASS requis}
+    AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?AUTHENTIK_SECRET_KEY requis}
+    AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL}
+    AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:?AUTHENTIK_BOOTSTRAP_PASSWORD requis}
+  volumes:
+    - authentik-data:/data
+    - authentik-templates:/templates
+  shm_size: 512mb
+
+services:
+  caddy:
+    <<: *security
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HTTP_PORT:-80}:8080"
+    environment:
+      PUBLIC_SCHEME: ${PUBLIC_SCHEME:-http}
+      AUTHENTIK_HOST: ${AUTHENTIK_HOST:?AUTHENTIK_HOST requis}
+      RALLLY_HOST: ${RALLLY_HOST:?RALLLY_HOST requis}
+      MAIL_HOST: ${MAIL_HOST:?MAIL_HOST requis}
+    volumes:
+      - ./proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+    tmpfs:
+      - /data:uid=1000,gid=1000
+      - /config:uid=1000,gid=1000
+    networks:
+      proxy:
+        aliases:
+          - ${AUTHENTIK_HOST}
+          - ${RALLLY_HOST}
+          - ${MAIL_HOST}
+
+  authentik-db:
+    <<: *security
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: authentik
+      POSTGRES_USER: authentik
+      POSTGRES_PASSWORD: ${PG_PASS:?PG_PASS requis}
+    volumes:
+      - authentik-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d authentik -U authentik"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [backend]
+
+  authentik-server:
+    <<: *authentik
+    command: server
+    networks: [proxy, backend]
+
+  authentik-worker:
+    <<: *authentik
+    command: worker
+    networks: [proxy, backend]
+
+  rallly:
+    <<: *security
+    image: ${RALLLY_IMAGE:-lukevella/rallly:4}
+    restart: unless-stopped
+    depends_on:
+      rallly-db:
+        condition: service_healthy
+      garage:
+        condition: service_started
+    environment:
+      NEXT_PUBLIC_BASE_URL: ${PUBLIC_SCHEME:-http}://${RALLLY_HOST}
+      SECRET_PASSWORD: ${SECRET_PASSWORD:?SECRET_PASSWORD requis}
+      SUPPORT_EMAIL: ${SUPPORT_EMAIL}
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD requis}@rallly-db:5432/rallly
+      S3_ENDPOINT: http://garage:3900
+      S3_BUCKET_NAME: rallly
+      S3_REGION: garage
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?S3_ACCESS_KEY_ID requis}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY requis}
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      SMTP_SECURE: "false"
+      OIDC_NAME: ${OIDC_NAME:-Authentik}
+      OIDC_DISCOVERY_URL: ${OIDC_DISCOVERY_URL:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+    networks: [proxy, backend]
+
+  rallly-db:
+    <<: *security
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: rallly
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD requis}
+    volumes:
+      - rallly-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks: [backend]
+
+  garage:
+    <<: *security
+    image: dxflrs/garage:v2.3.0
+    restart: unless-stopped
+    command: /garage server --single-node --default-bucket
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:?GARAGE_RPC_SECRET requis}
+      GARAGE_DEFAULT_ACCESS_KEY: ${S3_ACCESS_KEY_ID}
+      GARAGE_DEFAULT_SECRET_KEY: ${S3_SECRET_ACCESS_KEY}
+      GARAGE_DEFAULT_BUCKET: rallly
+    volumes:
+      - ./rallly/garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    networks: [backend]
+
+  mailpit:
+    <<: *security
+    image: axllent/mailpit:v1.27
+    restart: unless-stopped
+    networks: [proxy, backend]
+
+# Caddy porte les alias des noms d'hôte sur le réseau proxy : les conteneurs (Rallly) joignent
+# Authentik avec la même URL que le navigateur, nécessaire à la découverte OIDC.
+networks:
+  proxy:
+  backend:
+    internal: true
+
+volumes:
+  authentik-db:
+  authentik-data:
+  authentik-templates:
+  rallly-db:
+  garage-meta:
+  garage-data:

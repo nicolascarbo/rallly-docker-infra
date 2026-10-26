@@ -1,0 +1,16 @@
+{
+	auto_https off
+	http_port 8080
+}
+
+{$PUBLIC_SCHEME}://{$AUTHENTIK_HOST} {
+	reverse_proxy authentik-server:9000
+}
+
+{$PUBLIC_SCHEME}://{$RALLLY_HOST} {
+	reverse_proxy rallly:3000
+}
+
+{$PUBLIC_SCHEME}://{$MAIL_HOST} {
+	reverse_proxy mailpit:8025
+}
